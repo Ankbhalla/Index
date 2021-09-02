@@ -1,0 +1,155 @@
+ --@TableName varchar(100)  
+
+ Begin 
+ DECLARE @TableName varchar(100); 
+ DECLARE @TempTable AS TABLE (SchemaName VARCHAR(100),   
+        ObjectID INT,   
+        TableName VARCHAR(100),   
+        IndexID INT,   
+        IndexName VARCHAR(5000),   
+        ColumnID INT,   
+        column_index_id INT,   
+        ColumnNames  VARCHAR(4096),   
+        IncludeColumns  VARCHAR(4096),   
+        NumberOfColumns INT,   
+        IndexType  VARCHAR(20),
+		LastColRecord INT);
+	 
+  set @TableName = 'Order';
+  
+--Index column information  
+WITH CTE_Indexes (SchemaName, ObjectID, TableName, IndexID, IndexName, ColumnID, column_index_id, ColumnNames, IncludeColumns, NumberOfColumns, IndexType)  
+AS  
+(  
+SELECT s.name, t.object_id, t.name, i.index_id, i.name, c.column_id, ic.index_column_id,  
+  CASE ic.is_included_column WHEN 0 THEN CAST(c.name AS VARCHAR(5000)) ELSE '' END,   
+  CASE ic.is_included_column WHEN 1 THEN CAST(c.name AS VARCHAR(5000)) ELSE '' END, 1, i.type_desc  
+ FROM  sys.schemas AS s  
+  JOIN sys.tables AS t ON s.schema_id = t.schema_id  
+   JOIN sys.indexes AS i ON i.object_id = t.object_id  
+    JOIN sys.index_columns AS ic ON ic.index_id = i.index_id AND ic.object_id = i.object_id  
+     JOIN sys.columns AS c ON c.column_id = ic.column_id AND c.object_id = ic.object_id  
+      AND ic.index_column_id = 1  where t.object_id=object_id(@TableName)  
+UNION ALL  
+SELECT s.name, t.object_id, t.name, i.index_id, i.name, c.column_id, ic.index_column_id,  
+  CASE ic.is_included_column WHEN 0 THEN CAST(cte.ColumnNames + ', ' + c.name AS VARCHAR(5000))  ELSE cte.ColumnNames END,   
+  CASE    
+   WHEN ic.is_included_column = 1 AND cte.IncludeColumns != '' THEN CAST(cte.IncludeColumns + ', ' + c.name AS VARCHAR(5000))  
+   WHEN ic.is_included_column =1 AND cte.IncludeColumns = '' THEN CAST(c.name AS VARCHAR(5000))   
+   ELSE ''   
+  END,  
+  cte.NumberOfColumns + 1, i.type_desc  
+ FROM  sys.schemas AS s  
+  JOIN sys.tables AS t ON s.schema_id = t.schema_id  
+   JOIN sys.indexes AS i ON i.object_id = t.object_id  
+    JOIN sys.index_columns AS ic ON ic.index_id = i.index_id AND ic.object_id = i.object_id  
+     JOIN sys.columns AS c ON c.column_id = ic.column_id AND c.object_id = ic.object_id   
+     JOIN CTE_Indexes cte ON cte.Column_index_ID + 1 = ic.index_column_id    
+     --JOIN CTE_Indexes cte ON cte.ColumnID + 1 = ic.index_column_id    
+       AND cte.IndexID = i.index_id AND cte.ObjectID = ic.object_id  
+       where t.object_id=object_id(@TableName)  
+  
+)  
+  
+-- Populate the Table variable   
+INSERT INTO  @TempTable   
+--SELECT *, RANK() OVER (PARTITION BY ObjectID, IndexID ORDER BY NumberOfColumns DESC) AS LastRecord FROM CTE_Indexes AS cte;  
+select cte.SchemaName , cte.ObjectID , cte.TableName ,   cte.IndexID ,   cte.IndexName ,  cte.ColumnID ,  cte.column_index_id ,   
+  cte.ColumnNames , cte.IncludeColumns  ,  cte.NumberOfColumns ,  cte.IndexType  ,  
+RANK() OVER (PARTITION BY cte.ObjectID, cte.IndexID ORDER BY cte.NumberOfColumns DESC) AS LastRecord from cte_indexes cte  
+ Inner join (select IndexID,max(column_index_id) maxcid  
+from cte_indexes   
+group by IndexID) e2  
+on cte.IndexID=e2.IndexID and cte.column_index_id = e2.maxcid  
+  
+  
+  
+--- Index space information   
+;With ids (objectID,  IndexName , IndexSizeKB,users_seeks,last_users_seeks,user_scan,last_user_scan,user_lookups,user_updates,last_user_update,avg_fragmentation_in_percent,PAGE_COUNT)  
+AS  
+(  
+SELECT i.object_id ,i.name AS IndexName,  
+8 * SUM(s.used_page_count) AS IndexSizeKB,  
+ixs.user_seeks as users_seeks,  
+ixs.last_user_seek as last_users_seeks,  
+ixs.user_scans as user_scan,  
+ixs.last_user_scan as last_user_scan,  
+ixs.user_lookups as user_lookups,  
+ixs.user_updates as user_updates ,  
+ixs.last_user_update as last_user_update,  
+indexstats.avg_fragmentation_in_percent,  
+indexstats.page_count  
+  
+FROM sys.indexes AS i  
+INNER JOIN sys.dm_db_partition_stats AS s ON i.[object_id] = s.[object_id] AND i.index_id = s.index_id  
+INNER JOIN sys.dm_db_index_usage_stats As ixs  ON ixs.object_id = i.object_id and ixs.index_id = s.index_id  
+iNNER JOIN sys.dm_db_index_physical_stats (DB_ID(), Object_Id(@TableName), NULL, NULL, NULL) AS indexstats ON indexstats.object_id=i.object_id AND indexstats.index_id=I.index_id  
+--WHERE s.[object_id] = OBJECT_ID(@TableName, N'U')  
+ where S.object_id=Object_Id(@TableName) and ixs.database_id=Db_Id()  
+GROUP BY i.object_id, i.name , ixs.user_seeks ,ixs.last_user_seek, ixs.user_scans , ixs.last_user_scan , ixs.user_lookups,ixs.user_updates,ixs.last_user_update ,indexstats.avg_fragmentation_in_percent,indexstats.page_count  
+ )  
+  
+   
+  
+  
+ ---- Final output  
+ SELECT   
+  tt.SchemaName,tt.TableName,tt.IndexName,tt.ColumnNames, tt.IncludeColumns,tt.IndexType,  
+  ide.IndexSizeKB,IDE.avg_fragmentation_in_percent,IDE.PAGE_COUNT,ide.users_seeks,ide.last_users_seeks,ide.user_scan,ide.last_user_scan,  
+  ide.user_lookups,ide.user_updates,ide.last_user_update  
+ FROM ids as ide   
+ INNER Join @TempTable as tt On tt.TableName = OBJECT_NAME(ide.objectID) and tt.IndexName = ide.IndexName  
+  WHERE tt.LastColRecord = 1   
+   ORDER BY tt.ObjectID, tt.TableName, tt.IndexID, tt.IndexName  
+  
+  
+  
+   SELECT CAST(SERVERPROPERTY('ServerName') AS [nvarchar](256)) AS [SQLServer]  
+    ,db.[database_id] AS [DatabaseID]  
+    ,db.[name] AS [DatabaseName]  
+    ,id.[object_id] AS [ObjectID]  
+    ,id.[statement] AS [FullyQualifiedObjectName]  
+    ,id.[equality_columns] AS [EqualityColumns]  
+    ,id.[inequality_columns] AS [InEqualityColumns]  
+    ,id.[included_columns] AS [IncludedColumns]  
+    ,gs.[unique_compiles] AS [UniqueCompiles]  
+    ,gs.[user_seeks] AS [UserSeeks]  
+    ,gs.[user_scans] AS [UserScans]  
+    ,gs.[last_user_seek] AS [LastUserSeekTime]  
+    ,gs.[last_user_scan] AS [LastUserScanTime]  
+    ,gs.[avg_total_user_cost] AS [AvgTotalUserCost]  
+    ,gs.[avg_user_impact] AS [AvgUserImpact]  
+    ,gs.[system_seeks] AS [SystemSeeks]  
+    ,gs.[system_scans] AS [SystemScans]  
+    ,gs.[last_system_seek] AS [LastSystemSeekTime]  
+    ,gs.[last_system_scan] AS [LastSystemScanTime]  
+    ,gs.[avg_total_system_cost] AS [AvgTotalSystemCost]  
+    ,gs.[avg_system_impact] AS [AvgSystemImpact]  
+    ,gs.[user_seeks] * gs.[avg_total_user_cost] * (gs.[avg_user_impact] * 0.01) AS [IndexAdvantage]  
+    ,'CREATE INDEX [Missing_IXNC_' + OBJECT_NAME(id.[object_id], db.[database_id]) + '_' + REPLACE(REPLACE(REPLACE(ISNULL(id.[equality_columns], ''), ', ', '_'), '[', ''), ']', '') + CASE  
+        WHEN id.[equality_columns] IS NOT NULL  
+            AND id.[inequality_columns] IS NOT NULL  
+            THEN '_'  
+        ELSE ''  
+        END + REPLACE(REPLACE(REPLACE(ISNULL(id.[inequality_columns], ''), ', ', '_'), '[', ''), ']', '') + '_' + LEFT(CAST(NEWID() AS [nvarchar](64)), 5) + ']' + ' ON ' + id.[statement] + ' (' + ISNULL(id.[equality_columns], '') + CASE  
+        WHEN id.[equality_columns] IS NOT NULL  
+            AND id.[inequality_columns] IS NOT NULL  
+            THEN ','  
+        ELSE ''  
+        END + ISNULL(id.[inequality_columns], '') + ')' + ISNULL(' INCLUDE (' + id.[included_columns] + ')', '') AS [ProposedIndex]  
+    ,CAST(CURRENT_TIMESTAMP AS [smalldatetime]) AS [CollectionDate]  
+FROM [sys].[dm_db_missing_index_group_stats] gs WITH (NOLOCK)  
+INNER JOIN [sys].[dm_db_missing_index_groups] ig WITH (NOLOCK)  
+    ON gs.[group_handle] = ig.[index_group_handle]  
+INNER JOIN [sys].[dm_db_missing_index_details] id WITH (NOLOCK)  
+    ON ig.[index_handle] = id.[index_handle]  
+INNER JOIN [sys].[databases] db WITH (NOLOCK)  
+    ON db.[database_id] = id.[database_id]  
+WHERE id.[database_id]= DB_ID() -- Remove this to see for entire instance  
+and id.object_id=Object_Id(@TableName)  
+ORDER BY [IndexAdvantage] DESC  
+OPTION (RECOMPILE);  
+END
+GO
+
+
